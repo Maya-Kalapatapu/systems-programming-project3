@@ -1,23 +1,31 @@
-# Simple Makefile for mysh
+CC       = gcc
+CFLAGS   = -Wall -g -std=c99 -fsanitize=address,undefined
+LDFLAGS  =
 
-CC      = gcc
-CFLAGS = -Wall -g -std=c99 -fsanitize=address,undefined
-LDFLAGS =
+TARGET       = mysh
+TEST_TARGET  = test_cmds
 
-OBJS = mysh_core.o mysh_cmds.o
+SRCS = mysh_core.c mysh_cmds.c
+OBJS = $(SRCS:.c=.o)
 
-all: mysh
+TEST_SRCS = test_cmds.c
+TEST_OBJS = $(TEST_SRCS:.c=.o)
 
-mysh: $(OBJS)
-	$(CC) $(CFLAGS) -o mysh $(OBJS) $(LDFLAGS)
 
-mysh_core.o: mysh_core.c mysh.h
-	$(CC) $(CFLAGS) -c mysh_core.c
+all: $(TARGET)
 
-mysh_cmds.o: mysh_cmds.c mysh.h
-	$(CC) $(CFLAGS) -c mysh_cmds.c
+# Default build
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
+
+# Test build
+$(TEST_TARGET): mysh_cmds.o $(TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ mysh_cmds.o $(TEST_OBJS)
+
+%.o: %.c mysh.h
+	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f mysh $(OBJS)
+	rm -f $(TARGET) $(TEST_TARGET) $(OBJS) $(TEST_OBJS)
 
 .PHONY: all clean
