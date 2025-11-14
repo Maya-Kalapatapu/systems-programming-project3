@@ -26,6 +26,6 @@ $(TEST_TARGET): mysh_cmds.o $(TEST_OBJS)
 	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(OBJS) $(TEST_OBJS)
+	rm -f $(TARGET) $(TEST_TARGET) $(OBJS) $(TEST_OBJS) out_*
 
 .PHONY: all clean
