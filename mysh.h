@@ -4,6 +4,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#define MAX_TOKENS        1024
+#define MAX_COMMANDS      64
+#define MAX_ARGS          64
+#define INPUT_BUFFER_SIZE 4096
+#define PROMPT "mysh> "
+
 /*
  * Condition for running this command based on the previous command's result.
  * COND_AND:  run only if previous succeeded  (status == 0)
@@ -81,5 +87,6 @@ exec_action_t execute_job(const job_t *job,
  * but both files may need to call it, so it has been placed in the header.
  */
 void free_job(job_t *job);
+int parse_line(char *line, job_t *job);
 
 #endif 
