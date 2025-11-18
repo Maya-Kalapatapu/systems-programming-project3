@@ -53,7 +53,7 @@ void free_job_t(job_t *job) {
     free(job->infile);
     free(job->outfile);
     
-    // Reset job structure (optional, but good practice)
+    // Reset job structure 
     memset(job, 0, sizeof(job_t));
 }
 
@@ -297,7 +297,6 @@ int read_and_execute_loop(int fd) {
                 int parse_status = parse_line(buffer + line_start, &job);
 
                 if (parse_status > 0) {
-                    // Command successfully parsed
 
                     // Conditional logic check
                     if (job.conditional == COND_AND && last_exit_status != 0) {
@@ -313,7 +312,7 @@ int read_and_execute_loop(int fd) {
                         // Check if a built-in command ('exit' or 'die') requested termination
                         if (action == EXEC_EXIT) {
                             free_job_t(&job);
-                            return shell_exit_status; // Exit gracefully
+                            return shell_exit_status; // Exit nicely 
                         } else if (action == EXEC_DIE) {
                             free_job_t(&job);
                             return shell_exit_status; // Exit abnormally (status 1)
