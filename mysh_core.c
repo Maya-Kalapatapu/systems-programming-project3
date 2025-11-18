@@ -2,18 +2,22 @@
 
 #include "mysh.h"
 #include <unistd.h>
-#include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <ctype.h>
 
-// --- Global Variable Definitions ---
+
+
 bool is_interactive = false;
 bool reading_from_terminal = false;
 int last_exit_status = 0; 
 int shell_exit_status = EXIT_SUCCESS; 
+static bool have_seen_command = false; // Track whether we've seen any (non-empty, syntactically valid) command yet.
 
-// --- Helper Functions ---
 
 // Custom error message printing
 void print_mysh_error(const char* context, const char* message) {
@@ -34,7 +38,7 @@ static char* safe_strdup(const char* s) {
 }
 
 // Cleans up dynamically allocated memory in job_t
-void free_job_t(job_t *job) {
+void free_job(job_t *job) {
     if (!job) return;
 
     if (job->argvv) {
@@ -98,37 +102,46 @@ static int simple_tokenize(char* line, char* tokens[MAX_TOKENS]) {
     return t;
 }
 
+
+
 // Parses the token stream into a job_t structure 
-int parse_line(char* line, job_t *job) {
-    char* tokens[MAX_TOKENS];
-    char** temp_argvs[MAX_COMMANDS];
+int parse_line(char *line, job_t *job) {
+    char *tokens[MAX_TOKENS];
+    char **temp_argvs[MAX_COMMANDS];
     int token_count = simple_tokenize(line, tokens);
-    
+
     if (token_count <= 0) {
-        return token_count == 0 ? 0 : -1; 
+        // 0  => empty line / comment only  (not an error)
+        // -1 => tokenization error
+        return (token_count == 0) ? 0 : -1;
     }
 
-    int current_token = 0;
+    // Initialize temp argv pointers to NULL so cleanup is easy
+    memset(temp_argvs, 0, sizeof(temp_argvs));
+
+    int current_token   = 0;
     int current_cmd_idx = 0;
-    int current_argc = 0;
-    
-    job->conditional = COND_NONE;
-    job->infile = NULL;
-    job->outfile = NULL;
+    int current_argc    = 0;
+
+    // Initialize job
+    job->cond      = COND_NONE;
+    job->infile    = NULL;
+    job->outfile   = NULL;
     job->num_procs = 0;
-    
-    // Check for conditional commands
+    job->argvv     = NULL;
+
+    // Check for leading conditional
     if (strcmp(tokens[0], "and") == 0) {
-        job->conditional = COND_AND;
+        job->cond = COND_AND;
         current_token++;
     } else if (strcmp(tokens[0], "or") == 0) {
-        job->conditional = COND_OR;
+        job->cond = COND_OR;
         current_token++;
     }
-    
-    // If only conditional token remains
+
+    // If only conditional token remains, that's a syntax error
     if (current_token >= token_count) {
-        if (job->conditional != COND_NONE) {
+        if (job->cond != COND_NONE) {
             print_mysh_error("syntax error", "Conditional must be followed by a command");
             goto parse_error;
         }
@@ -136,17 +149,18 @@ int parse_line(char* line, job_t *job) {
     }
 
     // Initialize argument array for the first command
-    temp_argvs[0] = (char**)malloc(MAX_ARGS * sizeof(char*));
+    temp_argvs[0] = (char **)malloc(MAX_ARGS * sizeof(char *));
     if (!temp_argvs[0]) {
         print_mysh_error("malloc", "Failed to allocate argument array");
         goto parse_error;
     }
-    temp_argvs[0][0] = NULL; // Initialize first slot for safety
+    temp_argvs[0][0] = NULL;
 
     // Process tokens
     while (current_token < token_count) {
-        char* token = tokens[current_token];
+        char *token = tokens[current_token];
 
+        // Handle pipeline separators
         if (strcmp(token, "|") == 0) {
             if (current_argc == 0) {
                 print_mysh_error("syntax error", "Empty command before pipe '|'");
@@ -156,72 +170,94 @@ int parse_line(char* line, job_t *job) {
                 print_mysh_error("syntax error", "Too many commands in pipeline");
                 goto parse_error;
             }
-            
+
             // Finalize current command and move to next
             temp_argvs[current_cmd_idx][current_argc] = NULL;
             current_cmd_idx++;
             current_argc = 0;
 
             // Initialize next command's argument array
-            temp_argvs[current_cmd_idx] = (char**)malloc(MAX_ARGS * sizeof(char*));
+            temp_argvs[current_cmd_idx] = (char **)malloc(MAX_ARGS * sizeof(char *));
             if (!temp_argvs[current_cmd_idx]) {
                 print_mysh_error("malloc", "Failed to allocate argument array");
                 goto parse_error;
             }
+            temp_argvs[current_cmd_idx][0] = NULL;
 
             current_token++;
             continue;
         }
 
+        // Handle redirection tokens: '<' or '>'
         if (strcmp(token, "<") == 0 || strcmp(token, ">") == 0) {
-            // Redirection
-            if (current_token + 1 >= token_count || is_builtin_name(tokens[current_token + 1])) {
+            if (current_token + 1 >= token_count) {
                 print_mysh_error("syntax error", "Redirection requires a valid filename");
                 goto parse_error;
             }
-            
-            char* filename = tokens[current_token + 1];
-            
-            // Redirection files are stored at the job level (first/last process)
+
+            char *filename = tokens[current_token + 1];
+
             if (strcmp(token, "<") == 0) {
                 if (job->infile) {
                     print_mysh_error("syntax error", "Multiple input redirections");
                     goto parse_error;
                 }
                 job->infile = safe_strdup(filename);
-            } else { 
+                if (!job->infile) {
+                    goto parse_error;
+                }
+            } else { // ">"
                 if (job->outfile) {
                     print_mysh_error("syntax error", "Multiple output redirections");
                     goto parse_error;
                 }
                 job->outfile = safe_strdup(filename);
+                if (!job->outfile) {
+                    goto parse_error;
+                }
             }
-            
-            current_token += 2; // Skip < or > and the filename
+
+            current_token += 2;  // skip redirection token and filename
             continue;
         }
 
         // Regular argument
-        if (current_argc >= MAX_ARGS - 1) { 
+        // Spec: "Use of and or or after a | is invalid."
+        // That corresponds to a subcommand (current_cmd_idx > 0) whose
+        // first token (current_argc == 0) is "and" or "or".
+        if (current_argc == 0 && current_cmd_idx > 0 &&
+            (strcmp(token, "and") == 0 || strcmp(token, "or") == 0)) {
+            print_mysh_error("syntax error", "Conditionals may not appear after a pipe");
+            goto parse_error;
+        }
+
+        if (current_argc >= MAX_ARGS - 1) {
             print_mysh_error("syntax error", "Too many arguments for command");
             goto parse_error;
         }
-        temp_argvs[current_cmd_idx][current_argc++] = safe_strdup(token);
+
+        temp_argvs[current_cmd_idx][current_argc] = safe_strdup(token);
+        if (!temp_argvs[current_cmd_idx][current_argc]) {
+            goto parse_error;
+        }
+        current_argc++;
+        temp_argvs[current_cmd_idx][current_argc] = NULL;
+
         current_token++;
     }
-    
-    // Final check for valid command
+
+    // Final check for valid last command
     if (current_argc == 0) {
         print_mysh_error("syntax error", "Empty command at end of line/pipeline");
         goto parse_error;
     }
-    
+
     // Finalize the last command's arguments
     temp_argvs[current_cmd_idx][current_argc] = NULL;
     job->num_procs = current_cmd_idx + 1;
 
-    // Transfer temp_argvs to the job->argvv structure
-    job->argvv = (char***)malloc(job->num_procs * sizeof(char**));
+    // Allocate job->argvv and transfer ownership of temp_argvs
+    job->argvv = (char ***)malloc(job->num_procs * sizeof(char **));
     if (!job->argvv) {
         print_mysh_error("malloc", "Failed to allocate process array");
         goto parse_error;
@@ -229,37 +265,43 @@ int parse_line(char* line, job_t *job) {
 
     for (size_t i = 0; i < job->num_procs; i++) {
         job->argvv[i] = temp_argvs[i];
+        temp_argvs[i] = NULL;
     }
-    
+
 parse_cleanup_success:
-    // free the temporary token array (as tokens were duplicated)
     for (int i = 0; i < token_count; i++) {
         free(tokens[i]);
     }
-    return 1; 
+    return 1;
 
 parse_error:
-    // Manual cleanup on error
-    for (int i = 0; i <= current_cmd_idx; i++) {
-        if (i > 0 && temp_argvs[i] == NULL) break; // Reached non-initialized
+    // Cleanup any temp_argvs and their strings
+    for (int i = 0; i < MAX_COMMANDS; i++) {
         if (temp_argvs[i]) {
+            char **argv = temp_argvs[i];
             for (int j = 0; j < MAX_ARGS; j++) {
-                if (j > 0 && temp_argvs[i][j] == NULL) break;
-                free(temp_argvs[i][j]);
+                if (argv[j] == NULL) break;
+                free(argv[j]);
             }
             free(temp_argvs[i]);
         }
     }
+
     free(job->infile);
     free(job->outfile);
+    job->infile  = NULL;
+    job->outfile = NULL;
+
     for (int i = 0; i < token_count; i++) {
         free(tokens[i]);
     }
-    memset(job, 0, sizeof(job_t)); // Clear job state
+
+    memset(job, 0, sizeof(job_t));
     return -1;
 }
 
-// The main input reading loop for both interactive and batch mode
+    
+
 int read_and_execute_loop(int fd) {
     char buffer[INPUT_BUFFER_SIZE];
     ssize_t bytes_read = 0;
@@ -298,28 +340,44 @@ int read_and_execute_loop(int fd) {
 
                 if (parse_status > 0) {
 
-                    // Conditional logic check
-                    if (job.conditional == COND_AND && last_exit_status != 0) {
-                        last_exit_status = last_exit_status; // Preserve previous failure status
-                    } else if (job.conditional == COND_OR && last_exit_status == 0) {
-                        last_exit_status = 0; // Preserve previous success status
+                    // Enforce: conditionals should not occur in the first command.
+                    if (!have_seen_command && job.cond != COND_NONE) {
+                        print_mysh_error("syntax error",
+                                         "Conditional cannot appear on first command");
+                        last_exit_status = 1;
+                        free_job(&job);
                     } else {
-                        // Execute the job
-                        int cmd_status = 0;
-                        exec_action_t action = execute_job(&job, reading_from_terminal, &cmd_status);
-                        last_exit_status = cmd_status;
+                        // Conditional logic check
+                        if (job.cond == COND_AND && last_exit_status != 0) {
+                            // Skip execution; preserve last_exit_status.
+                        } else if (job.cond == COND_OR && last_exit_status == 0) {
+                            // Skip execution; preserve last_exit_status.
+                        } else {
+                            // Execute the job
+                            int cmd_status = 0;
+                            exec_action_t action =
+                                execute_job(&job, reading_from_terminal, &cmd_status);
+                            last_exit_status = cmd_status;
 
-                        // Check if a built-in command ('exit' or 'die') requested termination
-                        if (action == EXEC_EXIT) {
-                            free_job_t(&job);
-                            return shell_exit_status; // Exit nicely 
-                        } else if (action == EXEC_DIE) {
-                            free_job_t(&job);
-                            return shell_exit_status; // Exit abnormally (status 1)
+                            // Check if a built-in command ('exit' or 'die') requested termination
+                            if (action == EXEC_EXIT) {
+                                free_job(&job);
+                                shell_exit_status = EXIT_SUCCESS;
+                                return shell_exit_status;
+                            } else if (action == EXEC_DIE) {
+                                free_job(&job);
+                                shell_exit_status = EXIT_FAILURE;
+                                return shell_exit_status;
+                            }
                         }
+
+                        // We saw a syntactically valid command this line,
+                        // whether or not it was executed due to conditionals.
+                        have_seen_command = true;
+                        free_job(&job);
                     }
-                    free_job_t(&job);
                 } else if (parse_status == -1) {
+                    // Syntax error
                     last_exit_status = 1;
                 }
                 
@@ -338,6 +396,8 @@ int read_and_execute_loop(int fd) {
     }
     return shell_exit_status;
 }
+
+#ifndef TESTING
 
 // Main function (Entry Point)
 int main(int argc, char *argv[]) {
@@ -381,3 +441,4 @@ int main(int argc, char *argv[]) {
 
     return exit_code;
 }
+#endif
