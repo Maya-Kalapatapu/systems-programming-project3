@@ -1,0 +1,21 @@
+# Sample script for mysh
+
+echo hello
+pwd
+echo pipeline test | wc -c
+
+# Conditional tests (jobs with leading "and"/"or")
+/bin/true
+and echo AND-branch-ran   # should run
+
+/bin/false
+and echo AND-branch-skipped   # should NOT run
+
+/bin/false
+or echo OR-branch-ran     # should run
+
+/bin/true
+or echo OR-branch-skipped     # should NOT run
+
+# Redirection test
+echo file test > sample_output.txt

@@ -37,6 +37,6 @@ $(TEST_TARGET): $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_OBJS) $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(OBJS) $(TEST_OBJS) out_* test_ls.txt
+	rm -f $(TARGET) $(TEST_TARGET) $(OBJS) $(TEST_OBJS) out_* test_ls.txt sample_output.txt
 
 .PHONY: all clean
