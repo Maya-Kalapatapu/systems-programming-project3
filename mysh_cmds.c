@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
+
 static char *my_strdup(const char *s) {
     if (s == NULL) return NULL;
     size_t len = strlen(s) + 1;
@@ -72,30 +73,136 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
         return EXEC_CONTINUE;
     }
 
-    // If this is a single command and it is a built-in, we can usually run it
-    // directly in the parent process (no fork), so that cd/exit/die affect
-    // the shell process itself.
-    if (job->num_procs == 1 && job->argvv[0] != NULL && job->argvv[0][0] != NULL) {
-        char *cmd_name = job->argvv[0][0];
+    // Scan for exit/die anywhere in the job so we can honor
+    // "jobs involving exit/die terminate the shell" even in pipelines.
+    bool has_exit = false;
+    bool has_die  = false;
+    for (size_t i = 0; i < job->num_procs; i++) {
+        if (job->argvv[i] == NULL || job->argvv[i][0] == NULL) {
+            continue;
+        }
+        const char *cmd = job->argvv[i][0];
+        if (strcmp(cmd, "die") == 0) {
+            has_die = true;
+        } else if (strcmp(cmd, "exit") == 0) {
+            has_exit = true;
+        }
+    }
 
-        if (is_builtin(cmd_name)) {
-            int status = 1;
-            exec_action_t builtin_action = EXEC_CONTINUE;
+    // Special handling for a single built-in command in the parent process
+    // so that cd/exit/die affect the shell itself. We also need to honor
+    // redirection (<, >) for these built-ins.
+    if (job->num_procs == 1 &&
+        job->argvv[0] != NULL &&
+        job->argvv[0][0] != NULL &&
+        is_builtin(job->argvv[0][0])) {
 
+        int status = 1;
+        exec_action_t builtin_action = EXEC_CONTINUE;
+
+        int saved_stdin  = -1;
+        int saved_stdout = -1;
+        int redir_error  = 0;
+
+        // Apply redirection in the parent if requested.
+        // Save old fds so we can restore after running the builtin.
+        if (job->infile != NULL) {
+            saved_stdin = dup(STDIN_FILENO);
+            if (saved_stdin < 0) {
+                perror("dup");
+                redir_error = -1;
+            }
+        }
+        if (redir_error == 0 && job->outfile != NULL) {
+            saved_stdout = dup(STDOUT_FILENO);
+            if (saved_stdout < 0) {
+                perror("dup");
+                redir_error = -1;
+            }
+        }
+
+        if (redir_error == 0) {
+            // Set up stdin from infile if present
+            if (job->infile != NULL) {
+                int fd_in = open_input_file(job->infile);
+                if (fd_in < 0) {
+                    redir_error = -1;
+                } else {
+                    if (dup2(fd_in, STDIN_FILENO) < 0) {
+                        perror("dup2");
+                        close(fd_in);
+                        redir_error = -1;
+                    } else {
+                        close(fd_in);
+                    }
+                }
+            }
+
+            // Set up stdout to outfile if present
+            if (redir_error == 0 && job->outfile != NULL) {
+                int fd_out = open_output_file(job->outfile);
+                if (fd_out < 0) {
+                    redir_error = -1;
+                } else {
+                    if (dup2(fd_out, STDOUT_FILENO) < 0) {
+                        perror("dup2");
+                        close(fd_out);
+                        redir_error = -1;
+                    } else {
+                        close(fd_out);
+                    }
+                }
+            }
+        }
+
+        if (redir_error == 0) {
             if (run_builtin_parent(job->argvv[0], &status, &builtin_action) < 0) {
                 status = 1;
             }
+        } else {
+            status = 1;
+        }
 
-            if (cmd_status != NULL) {
-                *cmd_status = status;
+        // Restore original stdin/stdout if we changed them
+        if (saved_stdin != -1) {
+            if (dup2(saved_stdin, STDIN_FILENO) < 0) {
+                perror("dup2");
             }
+            close(saved_stdin);
+        }
+        if (saved_stdout != -1) {
+            if (dup2(saved_stdout, STDOUT_FILENO) < 0) {
+                perror("dup2");
+            }
+            close(saved_stdout);
+        }
+
+        if (cmd_status != NULL) {
+            *cmd_status = status;
+        }
+
+        // If the builtin itself requested EXIT/DIE, honor that.
+        if (builtin_action != EXEC_CONTINUE) {
             return builtin_action;
         }
+
+        // Otherwise, if this job involved exit/die (e.g., an "exit" that
+        // failed somehow), still treat it as a terminating job according
+        // to the scan above.
+        if (action == EXEC_CONTINUE) {
+            if (has_die) {
+                action = EXEC_DIE;
+            } else if (has_exit) {
+                action = EXEC_EXIT;
+            }
+        }
+
+        return action;
     }
 
     // Not a "special" built-in case; either:
     //   - a single external command
-    //   - a single built-in we choose to run in a child
+    //   - a builtin we choose to run in a child (e.g., in a pipeline)
     //   - a pipeline of multiple commands
     int status = 1;
 
@@ -109,8 +216,19 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
         *cmd_status = status;
     }
 
-    return action;  // usually EXEC_CONTINUE; exit/die are handled via built-ins
+    // For non-parent-builtins, if this job involved die/exit anywhere,
+    // tell the core loop to terminate after the job completes.
+    if (action == EXEC_CONTINUE) {
+        if (has_die) {
+            action = EXEC_DIE;
+        } else if (has_exit) {
+            action = EXEC_EXIT;
+        }
+    }
+
+    return action;
 }
+
 
 
 // Simple command execution (no pipelines)
