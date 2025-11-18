@@ -4,9 +4,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-/***********************
- * Utility helpers
- ***********************/
+// Utility helpers
+
 static char *dupstr(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
@@ -16,10 +15,13 @@ static char *dupstr(const char *s) {
     return p;
 }
 
+/*
+ * Free fields allocated by init_single/init_pipeline_two.
+ * The parser-owned parts are freed by free_job(), not here.
+ */
 static void free_job_allocated_by_us(job_t *job) {
     if (!job) return;
 
-    // We only free the outer allocations we made in this file.
     if (job->argvv)  free(job->argvv);
     if (job->infile) free(job->infile);
     if (job->outfile) free(job->outfile);
@@ -50,13 +52,12 @@ static void init_pipeline_two(job_t *job, char **a, char **b) {
     job->argvv[1] = b;
 }
 
-/***********************
- * Parse tests (CORE)
- ***********************/
+// Parse tests (parser in mysh_core.c)
+
 static void test_parse_simple() {
     printf("=== test_parse_simple ===\n");
 
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "echo hi";
     int r = parse_line(line, &job);
 
@@ -75,7 +76,7 @@ static void test_parse_simple() {
 static void test_parse_pipeline() {
     printf("=== test_parse_pipeline ===\n");
 
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "echo hi | wc";
     int r = parse_line(line, &job);
 
@@ -102,7 +103,7 @@ static void test_parse_pipeline() {
 static void test_parse_redirs() {
     printf("=== test_parse_redirs ===\n");
 
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "cat < infile.txt > outfile.txt";
     int r = parse_line(line, &job);
 
@@ -122,21 +123,21 @@ static void test_parse_conditional_errors() {
     job_t job;
     int r;
 
-    // leading 'and' is syntactically ok for the parser; enforced by core loop
+    // Leading "and": accepted by parser, rejected by core loop.
     memset(&job, 0, sizeof(job));
     char line1[] = "and echo hi";
     r = parse_line(line1, &job);
     printf("  leading 'and' parse returned %d (expected 1; runtime enforces restriction)\n", r);
     free_job(&job);
 
-    // conditional after pipe is a true parse error
+    // Conditional after a pipe should be a parse error.
     memset(&job, 0, sizeof(job));
     char line2[] = "echo hi | and echo no";
     r = parse_line(line2, &job);
     printf("  pipe then 'and' returned %d (expected -1)\n", r);
     free_job(&job);
 
-    // bare 'or' is also a parse error
+    // Bare "or" is a parse error.
     memset(&job, 0, sizeof(job));
     char line3[] = "or";
     r = parse_line(line3, &job);
@@ -148,17 +149,16 @@ static void test_parse_conditional_errors() {
 
 static void test_parse_comment_only(void) {
     printf("=== test_parse_comment_only ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "# just a comment";
     int r = parse_line(line, &job);
     printf("  parse returned %d (expected 0)\n", r);
     printf("  num_procs=%zu (expected 0)\n\n", job.num_procs);
-    // no need to free_job; parser should not have allocated anything
 }
 
 static void test_parse_trailing_comment(void) {
     printf("=== test_parse_trailing_comment ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "echo hi # trailing comment";
     int r = parse_line(line, &job);
     printf("  parse returned %d (expected 1)\n", r);
@@ -169,10 +169,10 @@ static void test_parse_trailing_comment(void) {
     printf("\n");
 }
 
-// both directions in opposite order
+// Input and output redirection in the opposite order.
 static void test_parse_redirs_order_flipped(void) {
     printf("=== test_parse_redirs_order_flipped ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "cat > out2.txt < in2.txt";
     int r = parse_line(line, &job);
     printf("  parse returned %d (expected 1)\n", r);
@@ -182,10 +182,10 @@ static void test_parse_redirs_order_flipped(void) {
     printf("\n");
 }
 
-// multiple input redirections error
+// Multiple input redirections should be rejected.
 static void test_parse_multiple_input_redirs(void) {
     printf("=== test_parse_multiple_input_redirs ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "cat < a < b";
     int r = parse_line(line, &job);
     printf("  parse returned %d (expected -1)\n", r);
@@ -193,10 +193,10 @@ static void test_parse_multiple_input_redirs(void) {
     printf("\n");
 }
 
-// missing filename after redirection
+// Missing filename after redirection should be rejected.
 static void test_parse_redir_missing_filename(void) {
     printf("=== test_parse_redir_missing_filename ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line[] = "cat <";
     int r = parse_line(line, &job);
     printf("  'cat <' returned %d (expected -1)\n", r);
@@ -206,14 +206,14 @@ static void test_parse_redir_missing_filename(void) {
 
 static void test_parse_conditional_flags(void) {
     printf("=== test_parse_conditional_flags ===\n");
-    job_t job = {0};
+    job_t job = (job_t){0};
     char line1[] = "and echo hi";
     int r1 = parse_line(line1, &job);
     printf("  'and echo hi' parse=%d, cond=%d (expected 1, COND_AND=%d)\n",
            r1, job.cond, COND_AND);
     free_job(&job);
 
-    job_t job2 = {0};
+    job_t job2 = (job_t){0};
     char line2[] = "or echo hi";
     int r2 = parse_line(line2, &job2);
     printf("  'or echo hi' parse=%d, cond=%d (expected 1, COND_OR=%d)\n",
@@ -223,11 +223,8 @@ static void test_parse_conditional_flags(void) {
     printf("\n");
 }
 
+// Execution tests (execute_job in mysh_cmds.c)
 
-
-/***********************
- * Execution tests (CMDS)
- ***********************/
 static void test_exec_echo() {
     printf("=== test_exec_echo ===\n");
 
@@ -288,7 +285,7 @@ static void test_exec_die() {
     exec_action_t act = execute_job(&job, true, &st);
 
     printf("  action=%d (expected %d=EXEC_DIE)\n", act, EXEC_DIE);
-    printf("  status=%d (expected nonzero)\n\n", st);
+    printf("  status=%d (expected != 0)\n\n", st);
 
     free_job_allocated_by_us(&job);
 }
@@ -304,7 +301,7 @@ static void test_exec_missing_cmd() {
     exec_action_t act = execute_job(&job, true, &st);
 
     printf("  action=%d (expected %d=EXEC_CONTINUE)\n", act, EXEC_CONTINUE);
-    printf("  status=%d (expected nonzero)\n\n", st);
+    printf("  status=%d (expected != 0)\n\n", st);
 
     free_job_allocated_by_us(&job);
 }
@@ -347,14 +344,13 @@ static void test_batch_stdin_null(void) {
     int st = -1;
     exec_action_t act = execute_job(&job, /*input_is_tty=*/false, &st);
     printf("  action=%d (expected %d=EXEC_CONTINUE)\n", act, EXEC_CONTINUE);
-    printf("  status=%d (cat should not hang; any code is fine as long as it returns)\n\n", st);
+    printf("  status=%d (cat should not hang; any exit code is acceptable)\n\n", st);
 
     free_job_allocated_by_us(&job);
 }
 
-// --------------------------------------------------
 // which builtin tests
-// --------------------------------------------------
+
 static void test_exec_which_external(void) {
     printf("=== test_exec_which_external ===\n");
 
@@ -367,7 +363,7 @@ static void test_exec_which_external(void) {
 
     printf("  action=%d (expected %d=EXEC_CONTINUE)\n", act, EXEC_CONTINUE);
     printf("  status=%d (expected 0)\n", st);
-    printf("  (Output should be a path to ls)\n\n");
+    printf("  output: expected a path to ls\n\n");
 
     free_job_allocated_by_us(&job);
 }
@@ -383,8 +379,8 @@ static void test_exec_which_builtin(void) {
     exec_action_t act = execute_job(&job, true, &st);
 
     printf("  action=%d (expected %d=EXEC_CONTINUE)\n", act, EXEC_CONTINUE);
-    printf("  status=%d (expected nonzero; builtin should not be found as external)\n", st);
-    printf("  (Expected: no output)\n\n");
+    printf("  status=%d (expected != 0; builtin should not be found as external)\n", st);
+    printf("  output: expected no path\n\n");
 
     free_job_allocated_by_us(&job);
 }
@@ -400,16 +396,14 @@ static void test_exec_which_missing(void) {
     exec_action_t act = execute_job(&job, true, &st);
 
     printf("  action=%d (expected %d=EXEC_CONTINUE)\n", act, EXEC_CONTINUE);
-    printf("  status=%d (expected nonzero)\n", st);
-    printf("  (Expected: no output)\n\n");
+    printf("  status=%d (expected != 0)\n", st);
+    printf("  output: expected no path\n\n");
 
     free_job_allocated_by_us(&job);
 }
 
+// Main test runner
 
-/***********************
- * Main test runner
- ***********************/
 int main(void) {
     printf("======== PARSE TESTS ========\n");
     test_parse_simple();
@@ -435,7 +429,6 @@ int main(void) {
     test_exec_which_external();
     test_exec_which_builtin();
     test_exec_which_missing();
-    
 
     return 0;
 }

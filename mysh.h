@@ -30,7 +30,7 @@ typedef enum {
  *   - argvv[i] is the argv array (NULL-terminated) for the i-th process.
  *   - num_procs is the number of processes in the pipeline.
  *
- * Per spec, you may assume that if num_procs > 1 (a pipeline), then
+ * Per spec, callers may assume that if num_procs > 1 (a pipeline), then
  * infile and outfile are NULL (no redirection with pipelines).
  */
 typedef struct {
@@ -61,9 +61,11 @@ typedef enum {
  *
  * Parameters:
  *   job          - parsed job description (argvs, pipes, redirection, etc.)
- *   input_is_tty - true if mysh's standard input is a terminal; false if
- *                  reading from a file/pipe. When false, child processes
- *                  should have stdin redirected to /dev/null (per spec).
+ *   input_is_tty - true if commands are being read interactively from
+ *                  a terminal; false when running a script or when mysh's
+ *                  standard input is not a terminal. When false, child
+ *                  processes will have stdin redirected to /dev/null unless
+ *                  overridden by infile.
  *   cmd_status   - if non-NULL, will be set to the exit status of the job:
  *                    0     => success
  *                    != 0  => failure
@@ -71,7 +73,7 @@ typedef enum {
  * Returns:
  *   EXEC_CONTINUE, EXEC_EXIT, or EXEC_DIE to tell the core loop what to do.
  *
- * This function is to be implemented in mysh_cmds.c
+ * Implemented in mysh_cmds.c.
  */
 exec_action_t execute_job(const job_t *job,
                           bool input_is_tty,
@@ -83,10 +85,19 @@ exec_action_t execute_job(const job_t *job,
  * Assumes that any strings / arrays inside job were allocated by the parser.
  * Safe to call even if parts of job are NULL.
  *
- * This function can be implemented in mysh_core.c (with the parser),
- * but both files may need to call it, so it has been placed in the header.
+ * Implemented in mysh_core.c (with the parser), but shared in the header
+ * because both mysh_core.c and mysh_cmds.c may need to call it.
  */
 void free_job(job_t *job);
+
+/*
+ * Parse a single input line into a job_t.
+ *
+ * Returns:
+ *   1  on success (job filled in),
+ *   0  for an empty / comment-only line (job left empty),
+ *  -1  on syntax or allocation error (job reset to empty).
+ */
 int parse_line(char *line, job_t *job);
 
-#endif 
+#endif

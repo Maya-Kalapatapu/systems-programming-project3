@@ -19,7 +19,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
-
+/* Minimal strdup helper (avoids relying on non-standard strdup). */
 static char *my_strdup(const char *s) {
     if (s == NULL) return NULL;
     size_t len = strlen(s) + 1;
@@ -45,7 +45,7 @@ static int  open_output_file(const char *path);
 static int  is_builtin(const char *name);
 static int  run_builtin_parent(char *const argv[], int *status_out,
                                exec_action_t *action_out);
-static int  run_builtin_child(char *const argv[]); // for when builtins appear in pipelines
+static int  run_builtin_child(char *const argv[]);  // builtins when used in pipelines
 
 static int  builtin_cd(char *const argv[]);
 static int  builtin_pwd(char *const argv[]);
@@ -55,14 +55,14 @@ static int  builtin_die(char *const argv[], exec_action_t *action_out);
 
 static char *resolve_program_path(const char *cmd_name);
 
-// Public entry point
+// Public entry point for executing a single parsed job.
 exec_action_t
 execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
 {
     exec_action_t action = EXEC_CONTINUE;
 
     if (cmd_status != NULL) {
-        *cmd_status = 1;  // default to failure until proven otherwise
+        *cmd_status = 1;  // default to failure until command runs
     }
 
     if (job == NULL || job->num_procs == 0 || job->argvv == NULL) {
@@ -90,7 +90,7 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
     }
 
     // Special handling for a single built-in command in the parent process
-    // so that cd/exit/die affect the shell itself. We also need to honor
+    // so that cd/exit/die affect the shell itself. We also honor
     // redirection (<, >) for these built-ins.
     if (job->num_procs == 1 &&
         job->argvv[0] != NULL &&
@@ -105,7 +105,7 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
         int redir_error  = 0;
 
         // Apply redirection in the parent if requested.
-        // Save old fds so we can restore after running the builtin.
+        // Save fds so we can restore them after running the builtin.
         if (job->infile != NULL) {
             saved_stdin = dup(STDIN_FILENO);
             if (saved_stdin < 0) {
@@ -202,7 +202,7 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
 
     // Not a "special" built-in case; either:
     //   - a single external command
-    //   - a builtin we choose to run in a child (e.g., in a pipeline)
+    //   - a builtin we run in a child (e.g., in a pipeline)
     //   - a pipeline of multiple commands
     int status = 1;
 
@@ -230,8 +230,7 @@ execute_job(const job_t *job, bool input_is_tty, int *cmd_status)
 }
 
 
-
-// Simple command execution (no pipelines)
+// Simple command execution (no pipelines).
 static int
 run_simple_command(const job_t *job, bool input_is_tty)
 {
@@ -254,7 +253,7 @@ run_simple_command(const job_t *job, bool input_is_tty)
             _exit(1);
         }
 
-        // Builtin in a child (e.g., because of redirection decisions)
+        // Builtin in a child (e.g., because of redirection decisions or tests)
         if (is_builtin(argv[0])) {
             (void)run_builtin_child((char *const *)argv);
             _exit(0);
@@ -352,7 +351,7 @@ run_pipeline(const job_t *job, bool input_is_tty)
         if (pid == 0) {
             // Child process i
 
-            // Batch-mode stdin behavior: redirect to /dev/null unless overridden.
+            // Batch-mode stdin behavior: redirect to /dev/null when not interactive.
             // Pipeline stages will then override stdin with dup2() where needed.
             if (setup_stdin_for_batch(input_is_tty) < 0) {
                 _exit(1);
@@ -425,11 +424,12 @@ run_pipeline(const job_t *job, bool input_is_tty)
     return last_status;
 }
 
-// Redirection and /dev/null behavior
+// Redirection and /dev/null behavior.
 static int
 setup_redirection(const char *infile, const char *outfile, bool input_is_tty)
 {
-    // In batch mode (non-tty), redirect stdin to /dev/null if no infile was given.
+    // In non-interactive mode, start by redirecting stdin to /dev/null.
+    // Any explicit infile (if present) then overrides this.
     if (setup_stdin_for_batch(input_is_tty) < 0) {
         return -1;
     }
@@ -467,11 +467,11 @@ static int
 setup_stdin_for_batch(bool input_is_tty)
 {
     if (input_is_tty) {
-        // Interactive mode: no special behavior
+        // Interactive mode: no special behavior.
         return 0;
     }
 
-    // Non-tty input: redirect stdin to /dev/null unless overridden by infile.
+    // Non-tty input: redirect stdin to /dev/null.
     int fd_null = open("/dev/null", O_RDONLY);
     if (fd_null < 0) {
         perror("/dev/null");
@@ -509,7 +509,7 @@ open_output_file(const char *path)
     return fd;
 }
 
-// Built-in detection and dispatch
+// Built-in detection and dispatch.
 static int
 is_builtin(const char *name)
 {
@@ -523,7 +523,7 @@ is_builtin(const char *name)
            strcmp(name, "die")   == 0;
 }
 
-// Run built-in in the parent process (for simple non-pipeline commands).
+// Run a built-in in the parent process (for simple non-pipeline commands).
 // Sets status_out to 0 on success, nonzero on failure.
 // Sets action_out to EXEC_EXIT / EXEC_DIE if those builtins are invoked.
 static int
@@ -594,7 +594,7 @@ run_builtin_child(char *const argv[])
     const char *cmd = argv[0];
 
     if (strcmp(cmd, "cd") == 0) {
-        // cd in a child doesn't affect parent
+        // cd in a child doesn't affect the parent shell.
         return 0;
     } else if (strcmp(cmd, "pwd") == 0) {
         return builtin_pwd(argv);
@@ -612,7 +612,8 @@ run_builtin_child(char *const argv[])
 }
 
 
-// Built-in implementations
+// Built-in implementations.
+
 static int
 builtin_cd(char *const argv[])
 {
@@ -638,7 +639,7 @@ builtin_cd(char *const argv[])
 static int
 builtin_pwd(char *const argv[])
 {
-    // No extra args expected (but you could allow them silently if you want)
+    // No extra args allowed.
     if (argv[1] != NULL) {
         fprintf(stderr, "pwd: too many arguments\n");
         return 1;
@@ -665,20 +666,20 @@ builtin_which(char *const argv[])
     }
 
     if (argc != 2) {
-        // wrong number of args: print nothing, fail
+        // Wrong number of args: print nothing, fail.
         return 1;
     }
 
     const char *name = argv[1];
 
-    // If it's a builtin, fail (print nothing)
+    // If it's a builtin, fail (print nothing).
     if (is_builtin(name)) {
         return 1;
     }
 
     char *path = resolve_program_path(name);
     if (path == NULL) {
-        // not found: print nothing, fail
+        // Not found: print nothing, fail.
         return 1;
     }
 
@@ -690,7 +691,7 @@ builtin_which(char *const argv[])
 static int
 builtin_exit(char *const argv[], exec_action_t *action_out)
 {
-    // You could enforce no extra args; spec doesn't insist.
+    // Extra arguments are ignored; spec does not prescribe behavior.
     (void)argv;
 
     if (action_out != NULL) {
@@ -702,7 +703,7 @@ builtin_exit(char *const argv[], exec_action_t *action_out)
 static int
 builtin_die(char *const argv[], exec_action_t *action_out)
 {
-    // Print arguments (if any) separated by spaces, then newline.
+    // Print arguments (if any) to stderr, separated by spaces, then newline.
     if (argv != NULL && argv[1] != NULL) {
         for (int i = 1; argv[i] != NULL; i++) {
             if (i > 1) {
@@ -722,7 +723,7 @@ builtin_die(char *const argv[], exec_action_t *action_out)
 
 
 // Program path resolution
-// Implements the "Bare names" rules from the spec:
+// Implements the "bare names" rules from the spec:
 //   - If cmd_name contains '/', treat it as a path directly.
 //   - Otherwise, if it's a built-in, do not search the filesystem.
 //   - Else search /usr/local/bin, /usr/bin, /bin in that order using access().
